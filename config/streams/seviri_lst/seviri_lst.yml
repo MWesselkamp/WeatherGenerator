@@ -5,6 +5,9 @@ SEVIRI_LST :
   data_end_time : "2017-12-31 00:00"
   source_exclude: []
   target_exclude: ["LANDCOV", "quality_flag", "DEM", "FVC", "LW_MASK"]
+  target: ["LST"]
+  metadata: "/p/scratch/weatherai/shared/weather_generator_data/mpg_seviri_2017_lst_v0/metadata"
+  experiment: "johannesburg"
   loss_weight : 1.0
   masking_rate : 0.6
   masking_rate_none : 0.05

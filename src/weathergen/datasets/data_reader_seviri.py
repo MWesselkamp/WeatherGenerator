@@ -19,6 +19,9 @@ from numpy.typing import NDArray
 import code 
 import pdb 
 
+# for reading the parquet files
+import pandas as pd
+
 from weathergen.datasets.data_reader_base import (
     DataReaderTimestep,
     ReaderData,
@@ -28,6 +31,8 @@ from weathergen.datasets.data_reader_base import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
 
 class DataReaderSeviri(DataReaderTimestep):
     """Data reader for SEVIRI satellite data."""
@@ -42,9 +47,14 @@ class DataReaderSeviri(DataReaderTimestep):
         """Initialize the SEVIRI data reader."""
         np32 = np.float32
 
-        ds = xr.open_dataset(filename, group= "seviri", engine="zarr")
+        time_ds = xr.open_zarr(filename, group= "era5")
+        ds = xr.open_zarr(filename, group= "seviri")
+        
+        #code.interact(local=locals())
+        #pdb.breakpoint()
+        print("Max time: ", time_ds.time.max().values)
 
-        if tw_handler.t_start >= ds.time.max() or tw_handler.t_end <= ds.time.min():
+        if tw_handler.t_start >= time_ds.time.max() or tw_handler.t_end <= time_ds.time.min():
             name = stream_info["name"]
             _logger.warning(f"{name} is not supported over data loader window. Stream is skipped.")
             super().__init__(tw_handler, stream_info)
@@ -54,11 +64,10 @@ class DataReaderSeviri(DataReaderTimestep):
         if "frequency" in stream_info:
             assert False, "Frequency sub-sampling currently not supported"
 
-        data_start_time = ds.time[0].values
-        data_end_time = ds.time[20].values
+        data_start_time = time_ds.time[0].values
+        data_end_time = time_ds.time[20].values
 
         period = (data_end_time - data_start_time)
-        print(f"Data period: {period}")
 
         assert data_start_time is not None and data_end_time is not None, (
             data_start_time,
@@ -87,24 +96,29 @@ class DataReaderSeviri(DataReaderTimestep):
         lon_name = stream_info.get("longitude_name", "longitude")
         self.longitudes = _clip_lon(np.array(ds[lon_name], dtype=np32))
 
-        self.geoinfo_channels = stream_info.get("geoinfos", [])
-        self.geoinfo_idx = [self.channels_file.index(ch) for ch in self.geoinfo_channels]
-        # cache geoinfos
-        self.geoinfo_data = np.stack([np.array(ds[ch], dtype=np32) for ch in self.geoinfo_channels])
-        self.geoinfo_data = self.geoinfo_data.transpose()
-
-        # select/filter requested source channels
-        self.source_idx = self.select_channels(ds, "source")
-        self.source_channels = [self.channels_file[i] for i in self.source_idx]
-
         # select/filter requested target channels
+        # this will access the stream info, hence make sure to set it.
         self.target_idx = self.select_channels(ds, "target")
         self.target_channels = [self.channels_file[i] for i in self.target_idx]
 
+        ds_name = stream_info["name"]
+        _logger.info(f"{ds_name}: target channels: {self.target_channels}")
 
-    def _compute_mean_stdev(self):
-        """Implement this function if you need to compute mean and std on the fly."""
-        pass
+        self.properties = {
+            "stream_id": 0,
+        }
+
+        self._create_statistics_lookup()
+
+        mean, stdev = self.mean_lookup[self.target_channels].values.astype(np32), self.std_lookup[self.target_channels].values.astype(np32)
+
+        code.interact(local=locals())
+
+    def _create_statistics_lookup(self):
+        statistics = Path(self.stream_info["metadata"]) / self.stream_info["experiment"] / "seviri_statistics.parquet"
+        df_stats = pd.read_parquet(statistics)
+        self.mean_lookup = df_stats.set_index('variable')["mean"]
+        self.std_lookup = df_stats.set_index('variable')["std"]
 
     @override
     def _init_empty(self) -> None:
@@ -133,4 +147,32 @@ class DataReaderSeviri(DataReaderTimestep):
         pass
 
     def select_channels(self, ds, ch_type: str) -> NDArray[np.int64]:
-        pass
+
+        """Select channels based on stream info for either source or target."""
+
+        channels = self.stream_info.get(ch_type)
+        assert channels is not None, f"{ch_type} channels need to be specified"
+        # sanity check
+        is_empty = len(channels) == 0 if channels is not None else False
+        if is_empty:
+            stream_name = self.stream_info["name"]
+            _logger.warning(f"No channel for {stream_name} for {ch_type}.")
+
+        chs_idx = np.sort([self.channels_file.index(ch) for ch in channels])
+
+        return np.array(chs_idx)
+
+
+def _clip_lat(lats: NDArray) -> NDArray[np.float32]:
+    """
+    Clip latitudes to the range [-90, 90] and ensure periodicity.
+    """
+    return (2 * np.clip(lats, -90.0, 90.0) - lats).astype(np.float32)
+
+
+# TODO: move to base class
+def _clip_lon(lons: NDArray) -> NDArray[np.float32]:
+    """
+    Clip longitudes to the range [-180, 180] and ensure periodicity.
+    """
+    return ((lons + 180.0) % 360.0 - 180.0).astype(np.float32)
