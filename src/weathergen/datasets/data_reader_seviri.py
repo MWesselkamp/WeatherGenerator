@@ -47,6 +47,7 @@ class DataReaderSeviri(DataReaderTimestep):
         """Initialize the SEVIRI data reader."""
         np32 = np.float32
 
+        # open the dataset the way we want it
         time_ds = xr.open_zarr(filename, group= "era5")
         ds = xr.open_zarr(filename, group= "seviri")
         
@@ -54,6 +55,7 @@ class DataReaderSeviri(DataReaderTimestep):
         #pdb.breakpoint()
         print("Max time: ", time_ds.time.max().values)
 
+        # check if the data overlaps with the time window, otherwise initialises as empty datareader
         if tw_handler.t_start >= time_ds.time.max() or tw_handler.t_end <= time_ds.time.min():
             name = stream_info["name"]
             _logger.warning(f"{name} is not supported over data loader window. Stream is skipped.")
@@ -64,6 +66,7 @@ class DataReaderSeviri(DataReaderTimestep):
         if "frequency" in stream_info:
             assert False, "Frequency sub-sampling currently not supported"
 
+        # checks length of time in dataset
         data_start_time = time_ds.time[0].values
         data_end_time = time_ds.time[20].values
 
@@ -73,6 +76,8 @@ class DataReaderSeviri(DataReaderTimestep):
             data_start_time,
             data_end_time,
         )
+
+        # sets the time window handler and stream info in the base class
         super().__init__(
             tw_handler,
             stream_info,
@@ -80,6 +85,7 @@ class DataReaderSeviri(DataReaderTimestep):
             data_end_time,
             period,
         )
+
         # If there is no overlap with the time range, no need to keep the dataset.
         if tw_handler.t_start >= data_end_time or tw_handler.t_end <= data_start_time:
             self._init_empty()
@@ -96,10 +102,20 @@ class DataReaderSeviri(DataReaderTimestep):
         lon_name = stream_info.get("longitude_name", "longitude")
         self.longitudes = _clip_lon(np.array(ds[lon_name], dtype=np32))
 
+
+        self.geoinfo_channels = stream_info.get("geoinfos", [])
+        self.geoinfo_idx = [self.channels_file.index(ch) for ch in self.geoinfo_channels]
+        # cache geoinfos
+        self.geoinfo_data = np.stack([np.array(ds[ch], dtype=np32) for ch in self.geoinfo_channels])
+        self.geoinfo_data = self.geoinfo_data.transpose()
+
         # select/filter requested target channels
         # this will access the stream info, hence make sure to set it.
         self.target_idx = self.select_channels(ds, "target")
         self.target_channels = [self.channels_file[i] for i in self.target_idx]
+
+        self.source_idx = self.select_channels(ds, "source")
+        self.source_channels = [self.channels_file[i] for i in self.source_idx]
 
         ds_name = stream_info["name"]
         _logger.info(f"{ds_name}: target channels: {self.target_channels}")
@@ -108,11 +124,10 @@ class DataReaderSeviri(DataReaderTimestep):
             "stream_id": 0,
         }
 
+        # or your function to load or compute the statistics
         self._create_statistics_lookup()
 
         mean, stdev = self.mean_lookup[self.target_channels].values.astype(np32), self.std_lookup[self.target_channels].values.astype(np32)
-
-        code.interact(local=locals())
 
     def _create_statistics_lookup(self):
         statistics = Path(self.stream_info["metadata"]) / self.stream_info["experiment"] / "seviri_statistics.parquet"

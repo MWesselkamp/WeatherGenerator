@@ -6,6 +6,8 @@ SEVIRI_LST :
   source_exclude: []
   target_exclude: ["LANDCOV", "quality_flag", "DEM", "FVC", "LW_MASK"]
   target: ["LST"]
+  source: []
+  geoinfos: ["DEM", "LANDCOV"]
   metadata: "/p/scratch/weatherai/shared/weather_generator_data/mpg_seviri_2017_lst_v0/metadata"
   experiment: "johannesburg"
   loss_weight : 1.0
