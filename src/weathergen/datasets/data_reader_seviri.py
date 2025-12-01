@@ -60,7 +60,7 @@ class DataReaderSeviri(DataReaderTimestep):
             name = stream_info["name"]
             _logger.warning(f"{name} is not supported over data loader window. Stream is skipped.")
             super().__init__(tw_handler, stream_info)
-            self._init_empty()
+            self.init_empty()
             return
         
         if "frequency" in stream_info:
@@ -88,7 +88,7 @@ class DataReaderSeviri(DataReaderTimestep):
 
         # If there is no overlap with the time range, no need to keep the dataset.
         if tw_handler.t_start >= data_end_time or tw_handler.t_end <= data_start_time:
-            self._init_empty()
+            self.init_empty()
             return
         else:
             self.ds = ds
@@ -127,7 +127,9 @@ class DataReaderSeviri(DataReaderTimestep):
         # or your function to load or compute the statistics
         self._create_statistics_lookup()
 
-        mean, stdev = self.mean_lookup[self.target_channels].values.astype(np32), self.std_lookup[self.target_channels].values.astype(np32)
+        self.mean, self.stdev = self.mean_lookup[self.target_channels].values.astype(np32), self.std_lookup[self.target_channels].values.astype(np32)
+
+        self.mean_geoinfo, self.stdev_geoinfo = self.mean_lookup[self.geoinfo_channels].values.astype(np32), self.std_lookup[self.geoinfo_channels].values.astype(np32)
 
     def _create_statistics_lookup(self):
         statistics = Path(self.stream_info["metadata"]) / self.stream_info["experiment"] / "seviri_statistics.parquet"
@@ -136,8 +138,8 @@ class DataReaderSeviri(DataReaderTimestep):
         self.std_lookup = df_stats.set_index('variable')["std"]
 
     @override
-    def _init_empty(self) -> None:
-        super()._init_empty()
+    def init_empty(self) -> None:
+        super().init_empty()
         self.ds = None
         self.len = 0
     
@@ -159,7 +161,56 @@ class DataReaderSeviri(DataReaderTimestep):
         -------
         ReaderData providing coords, geoinfos, data, datetimes
         """
-        pass
+
+        (t_idxs, dtr) = self._get_dataset_idxs(idx)
+
+        if self.ds is None or self.len == 0 or len(t_idxs) == 0:
+            return ReaderData.empty(
+                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
+            )
+
+        assert t_idxs[0] >= 0, "index must be non-negative"
+        didx_start = t_idxs[0]
+        # End is inclusive
+        didx_end = t_idxs[-1] + 1
+
+        # extract number of time steps and collapse ensemble dimension
+        # ds is a wrapper around zarr with get_coordinate_selection not being exposed since
+        # subsetting is pushed to the ctor via frequency argument; this also ensures that no sub-
+        # sampling is required here
+        sel_channels = [self.channels_file[i] for i in channels_idx]
+        data = self.ds[sel_channels].isel(time=slice(didx_start, didx_end)).to_array().values
+        # flatten along time dimension
+        data = data.transpose([1, 2, 0]).reshape((data.shape[1] * data.shape[2], data.shape[0]))
+        # set invalid values to NaN
+        mask = data == self.fillvalue
+        data[mask] = np.nan
+
+        # construct lat/lon coords
+        latlon = np.concatenate(
+            [
+                np.expand_dims(self.latitudes, 0),
+                np.expand_dims(self.longitudes, 0),
+            ],
+            axis=0,
+        ).transpose()
+
+        # repeat len(t_idxs) times
+        coords = np.vstack((latlon,) * len(t_idxs))
+        geoinfos = np.vstack((self.geoinfo_data,) * len(t_idxs))
+
+        # date time matching #data points of data
+        datetimes = np.repeat(self.ds.time[didx_start:didx_end].values, len(data) // len(t_idxs))
+
+        rd = ReaderData(
+            coords=coords,
+            geoinfos=geoinfos,
+            data=data,
+            datetimes=datetimes,
+        )
+        check_reader_data(rd, dtr)
+
+        return rd
 
     def select_channels(self, ds, ch_type: str) -> NDArray[np.int64]:
 
