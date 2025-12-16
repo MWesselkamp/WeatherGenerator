@@ -13,6 +13,9 @@ import pathlib
 import numpy as np
 import torch
 
+# for interactive debugging
+import code
+
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
 from weathergen.datasets.data_reader_base import (

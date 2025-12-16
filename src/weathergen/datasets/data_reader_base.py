@@ -577,6 +577,7 @@ class DataReaderBase(metaclass=ABCMeta):
         Normalized data
         """
         assert target.shape[-1] == len(self.target_idx), "incorrect number of target channels"
+
         for i, ch in enumerate(self.target_idx):
             target[..., i] = (target[..., i] - self.mean[ch]) / self.stdev[ch]
 

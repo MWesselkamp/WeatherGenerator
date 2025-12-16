@@ -67,10 +67,13 @@ class DataReaderSeviri(DataReaderTimestep):
             assert False, "Frequency sub-sampling currently not supported"
 
         # checks length of time in dataset
-        data_start_time = time_ds.time[0].values
-        data_end_time = time_ds.time[20].values
+        idx_start = 0
+        idx_end = 120 # len(time_ds.time) - 1
+        data_start_time = time_ds.time[idx_start].values
+        data_end_time = time_ds.time[idx_end].values
 
         period = (data_end_time - data_start_time)
+        print("Data period: ", period)
 
         assert data_start_time is not None and data_end_time is not None, (
             data_start_time,
@@ -92,11 +95,13 @@ class DataReaderSeviri(DataReaderTimestep):
             return
         else:
             self.ds = ds
-            self.len = len(ds)
+            self.len = idx_end - idx_start #len(ds)
 
-        self.channels_file = [k for k in self.ds.keys()]
+        self.exclude = {"LWMASK", "_indices", "quality_flag"} # exclude these from channels because we don't have a statistics for them
+        self.channels_file = [k for k in self.ds.keys()] 
 
         # caches lats and lons
+        # if you want a spatial subset, do it here
         lat_name = stream_info.get("latitude_name", "latitude")
         self.latitudes = _clip_lat(np.array(ds[lat_name], dtype=np32))
         lon_name = stream_info.get("longitude_name", "longitude")
@@ -106,36 +111,54 @@ class DataReaderSeviri(DataReaderTimestep):
         self.geoinfo_channels = stream_info.get("geoinfos", [])
         self.geoinfo_idx = [self.channels_file.index(ch) for ch in self.geoinfo_channels]
         # cache geoinfos
-        self.geoinfo_data = np.stack([np.array(ds[ch], dtype=np32) for ch in self.geoinfo_channels])
-        self.geoinfo_data = self.geoinfo_data.transpose()
+        #self.geoinfo_data = np.stack([np.array(ds[ch], dtype=np32) for ch in self.geoinfo_channels])
+        #self.geoinfo_data = self.geoinfo_data.transpose()
 
         # select/filter requested target channels
         # this will access the stream info, hence make sure to set it.
-        self.target_idx = self.select_channels(ds, "target")
-        self.target_channels = [self.channels_file[i] for i in self.target_idx]
+        self.target_idx, self.target_channels = self.select_channels(ds, "target")
+        #self.target_channels = [self.channels_file[i] for i in self.target_idx]
 
-        self.source_idx = self.select_channels(ds, "source")
-        self.source_channels = [self.channels_file[i] for i in self.source_idx]
+        self.source_idx, self.source_channels = self.select_channels(ds, "source")
+        #self.source_channels = [self.channels_file[i] for i in self.source_idx]
+        #print("Source channels:", self.source_channels)
 
         ds_name = stream_info["name"]
         _logger.info(f"{ds_name}: target channels: {self.target_channels}")
 
+        # what is this doing?
         self.properties = {
             "stream_id": 0,
         }
 
         # or your function to load or compute the statistics
-        self._create_statistics_lookup()
+        self.mean, self.stdev = self._create_statistics()
 
-        self.mean, self.stdev = self.mean_lookup[self.target_channels].values.astype(np32), self.std_lookup[self.target_channels].values.astype(np32)
+        self.mean_geoinfo, self.stdev_geoinfo = self.mean[self.geoinfo_idx], self.stdev[self.geoinfo_idx]
 
-        self.mean_geoinfo, self.stdev_geoinfo = self.mean_lookup[self.geoinfo_channels].values.astype(np32), self.std_lookup[self.geoinfo_channels].values.astype(np32)
-
-    def _create_statistics_lookup(self):
+    def _create_statistics(self):
         statistics = Path(self.stream_info["metadata"]) / self.stream_info["experiment"] / "seviri_statistics.parquet"
         df_stats = pd.read_parquet(statistics)
-        self.mean_lookup = df_stats.set_index('variable')["mean"]
-        self.std_lookup = df_stats.set_index('variable')["std"]
+        mean_lookup = df_stats.set_index('variable')["mean"]
+        std_lookup = df_stats.set_index('variable')["std"]
+
+        mean, stdev = [], []
+
+        for ch in self.channels_file:
+            if ch in self.exclude:
+                mean.append(0.0) # placeholder for those we don't have statistics for
+                stdev.append(1.0)
+            else:
+                mean.append(mean_lookup[ch].astype(np.float32))
+                stdev.append(std_lookup[ch].astype(np.float32))
+        
+        mean = np.array(mean)
+        stdev = np.array(stdev)
+
+        print("Mean shape", mean.shape)
+        print("Means", mean)
+
+        return mean, stdev
 
     @override
     def init_empty(self) -> None:
@@ -148,14 +171,14 @@ class DataReaderSeviri(DataReaderTimestep):
         return self.len
 
     @override
-    def _get(self, idx: TIndex) -> ReaderData:
+    def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
         """
         Get data for window (for either source or target, through public interface)
         Parameters
         ----------
         idx : int
             Index of temporal window
-        channels_idx : np.array
+        channels_idx : list[int]
             Selection of channels
         Returns
         -------
@@ -224,9 +247,15 @@ class DataReaderSeviri(DataReaderTimestep):
             stream_name = self.stream_info["name"]
             _logger.warning(f"No channel for {stream_name} for {ch_type}.")
 
-        chs_idx = np.sort([self.channels_file.index(ch) for ch in channels])
+        if is_empty:
+            _logger.warning(f"No channel selected for {stream_name} for {ch_type}.")
+            chs_idx = np.empty(shape=[0], dtype=int)
+            channels = []
+        else:
+            chs_idx = np.sort([self.channels_file.index(ch) for ch in channels])
+            channels = [self.channels_file[i] for i in chs_idx]
 
-        return np.array(chs_idx)
+        return np.array(chs_idx), channels
 
 
 def _clip_lat(lats: NDArray) -> NDArray[np.float32]:
