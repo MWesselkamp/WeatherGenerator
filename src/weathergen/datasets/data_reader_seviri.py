@@ -48,15 +48,14 @@ class DataReaderSeviri(DataReaderTimestep):
         np32 = np.float32
 
         # open the dataset the way we want it
-        time_ds = xr.open_zarr(filename, group= "era5")
+        #time_ds = xr.open_zarr(filename, group= "era5")
         ds = xr.open_zarr(filename, group= "seviri")
-        
-        #code.interact(local=locals())
-        #pdb.breakpoint()
-        print("Max time: ", time_ds.time.max().values)
+        ds["time"] = ds["time"].astype("datetime64[ns]")
+        ds = ds.sel(time=slice(stream_info["data_start_time"], stream_info["data_end_time"]))
+        print("Selected time period: ", ds.time.min().values, " to ", ds.time.max().values)
 
         # check if the data overlaps with the time window, otherwise initialises as empty datareader
-        if tw_handler.t_start >= time_ds.time.max() or tw_handler.t_end <= time_ds.time.min():
+        if tw_handler.t_start >= ds.time.max() or tw_handler.t_end <= ds.time.min():
             name = stream_info["name"]
             _logger.warning(f"{name} is not supported over data loader window. Stream is skipped.")
             super().__init__(tw_handler, stream_info)
@@ -66,14 +65,9 @@ class DataReaderSeviri(DataReaderTimestep):
         if "frequency" in stream_info:
             assert False, "Frequency sub-sampling currently not supported"
 
-        # checks length of time in dataset
-        idx_start = 0
-        idx_end = 120 # len(time_ds.time) - 1
-        data_start_time = time_ds.time[idx_start].values
-        data_end_time = time_ds.time[idx_end].values
-
-        period = (data_end_time - data_start_time)
-        print("Data period: ", period)
+        period = (ds.time[1] - ds.time[0]).values
+        data_start_time = ds.time[0].values
+        data_end_time = ds.time[-1].values
 
         assert data_start_time is not None and data_end_time is not None, (
             data_start_time,
@@ -95,18 +89,23 @@ class DataReaderSeviri(DataReaderTimestep):
             return
         else:
             self.ds = ds
-            self.len = idx_end - idx_start #len(ds)
+            self.len = len(self.ds['time']) # len(ds), this returns the number of variables, not time steps
 
         self.exclude = {"LWMASK", "_indices", "quality_flag"} # exclude these from channels because we don't have a statistics for them
         self.channels_file = [k for k in self.ds.keys()] 
 
         # caches lats and lons
         # if you want a spatial subset, do it here
+        index_path  = Path(self.stream_info["metadata"]) / self.stream_info["experiment"] / "seviri_indices.parquet"
+        self.spatial_indices = pd.read_parquet(index_path)
+        ds = ds.isel(latitude=self.spatial_indices["lat_idx"], longitude=self.spatial_indices["lon_idx"])
+
         lat_name = stream_info.get("latitude_name", "latitude")
         self.latitudes = _clip_lat(np.array(ds[lat_name], dtype=np32))
         lon_name = stream_info.get("longitude_name", "longitude")
         self.longitudes = _clip_lon(np.array(ds[lon_name], dtype=np32))
 
+        #
 
         self.geoinfo_channels = stream_info.get("geoinfos", [])
         self.geoinfo_idx = [self.channels_file.index(ch) for ch in self.geoinfo_channels]
@@ -119,9 +118,12 @@ class DataReaderSeviri(DataReaderTimestep):
         self.target_idx, self.target_channels = self.select_channels(ds, "target")
         #self.target_channels = [self.channels_file[i] for i in self.target_idx]
 
-        self.source_idx, self.source_channels = self.select_channels(ds, "source")
-        #self.source_channels = [self.channels_file[i] for i in self.source_idx]
+        self.source_channels = stream_info.get("source", [])
+        #self.source_idx, self.source_channels = self.select_channels(ds, "source")
+        self.source_idx = [self.channels_file.index(ch) for ch in self.source_channels]
         #print("Source channels:", self.source_channels)
+
+        #code.interact(local=locals())
 
         ds_name = stream_info["name"]
         _logger.info(f"{ds_name}: target channels: {self.target_channels}")
@@ -187,7 +189,7 @@ class DataReaderSeviri(DataReaderTimestep):
 
         (t_idxs, dtr) = self._get_dataset_idxs(idx)
 
-        if self.ds is None or self.len == 0 or len(t_idxs) == 0:
+        if self.ds is None or self.len == 0 or len(t_idxs) == 0 or len(channels_idx) == 0:
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
@@ -201,29 +203,51 @@ class DataReaderSeviri(DataReaderTimestep):
         # ds is a wrapper around zarr with get_coordinate_selection not being exposed since
         # subsetting is pushed to the ctor via frequency argument; this also ensures that no sub-
         # sampling is required here
-        sel_channels = [self.channels_file[i] for i in channels_idx]
-        data = self.ds[sel_channels].isel(time=slice(didx_start, didx_end)).to_array().values
+        
+        #print("channels_idx to _get:", channels_idx)
+        #sel_channels = [self.channels_file[i] for i in channels_idx]
+        #print("Selected channels:", sel_channels)
+
+        sel_channels = "LST"
+        data = self.ds[sel_channels].isel(time=slice(didx_start, didx_end), 
+                            latitude=self.spatial_indices["lat_idx"], 
+                            longitude=self.spatial_indices["lon_idx"]).values
+
+        print("Data shape after channel selection:", data.shape) # (time, lat, lon) (6, 1474, 1474)
+
+        n_times = data.shape[0]
+        n_lats = data.shape[1]
+        n_lons = data.shape[2]
+        n_spatial = n_lats * n_lons
+
         # flatten along time dimension
-        data = data.transpose([1, 2, 0]).reshape((data.shape[1] * data.shape[2], data.shape[0]))
+        data = data.transpose([1, 2, 0]).reshape((n_spatial * n_times, -1))
+
+        # print("Data shape after flattening time:", data.shape) # (2172676, 6)
         # set invalid values to NaN
-        mask = data == self.fillvalue
-        data[mask] = np.nan
+        #mask = data == self.fillvalue
+        #data[mask] = np.nan
 
         # construct lat/lon coords
-        latlon = np.concatenate(
-            [
-                np.expand_dims(self.latitudes, 0),
-                np.expand_dims(self.longitudes, 0),
-            ],
-            axis=0,
-        ).transpose()
+        lat2d, lon2d = np.meshgrid(
+            self.latitudes,
+            self.longitudes,
+            indexing="ij",
+        ) 
+        lat_flat = lat2d.reshape(-1)   # (2172676,)
+        lon_flat = lon2d.reshape(-1)   # (2172676,)
 
-        # repeat len(t_idxs) times
-        coords = np.vstack((latlon,) * len(t_idxs))
-        geoinfos = np.vstack((self.geoinfo_data,) * len(t_idxs))
+        # Tile spatial coordinates for each timestep
+        coords = np.tile(np.column_stack((lat_flat, lon_flat)), (n_times, 1))
 
-        # date time matching #data points of data
-        datetimes = np.repeat(self.ds.time[didx_start:didx_end].values, len(data) // len(t_idxs))
+
+        datetimes = np.repeat(
+            self.ds.time[didx_start:didx_end].values, 
+            n_spatial
+        )
+
+        # Empty Geoinfos
+        geoinfos = np.zeros((n_spatial * n_times, 0), dtype=np.float32)
 
         rd = ReaderData(
             coords=coords,
