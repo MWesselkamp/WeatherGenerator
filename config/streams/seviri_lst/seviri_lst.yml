@@ -13,11 +13,9 @@ SEVIRI_LST :
   filenames : ['lst_test.zarr']
   data_start_time : "2017-05-01 00:00"
   data_end_time : "2017-06-30 00:00"
-  #source_exclude: ["LANDCOV", "quality_flag", "DEM", "FVC", "LW_MASK", "_indices", "AL-NI-DH", "standard_error", "LST"] #["LANDCOV", "quality_flag", "LST", "FVC", "LW_MASK"]
-  #target_exclude: ["LANDCOV", "quality_flag", "DEM", "FVC", "LW_MASK", "_indices", "AL-NI-DH", "standard_error"]
   target: ["LST"]
-  #source: []
-  geoinfos: [] #["DEM"] #  "LANDCOV"
+  source: ["LST"]
+  geoinfos: ["DEM"] #, "LANDCOV"]
   metadata: "/leonardo_work/AIFAC_5C0_154/weathergen/data/mpg_seviri_l2_2017-18_v0/metadata_lst_test"
   experiment: "johannesburg"
   loss_weight : 1.0

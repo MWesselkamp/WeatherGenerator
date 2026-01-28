@@ -14,6 +14,7 @@ from typing import override
 import numpy as np
 import xarray as xr
 from numpy.typing import NDArray
+import zarr
 
 # for interactive debugging
 import code 
@@ -33,7 +34,6 @@ from weathergen.datasets.data_reader_base import (
 _logger = logging.getLogger(__name__)
 
 
-
 class DataReaderSeviri(DataReaderTimestep):
     """Data reader for SEVIRI satellite data."""
 
@@ -45,17 +45,54 @@ class DataReaderSeviri(DataReaderTimestep):
     ) -> None:
 
         """Initialize the SEVIRI data reader."""
+
+        self.fillvalue = np.nan
         np32 = np.float32
 
-        # open the dataset the way we want it
-        #time_ds = xr.open_zarr(filename, group= "era5")
-        ds = xr.open_zarr(filename, group= "seviri")
-        ds["time"] = ds["time"].astype("datetime64[ns]")
-        ds = ds.sel(time=slice(stream_info["data_start_time"], stream_info["data_end_time"]))
-        print("Selected time period: ", ds.time.min().values, " to ", ds.time.max().values)
+        # set sampling parameters
+        self.stride_temporal = 6 # downsample to six hourly timesteps
+        self.stride_spatial = 8 # use every 8th point to reduce memory usage on workers
+
+        index_path  = Path(stream_info["metadata"]) / stream_info["experiment"] / "seviri_indices.parquet"
+        self.spatial_indices = pd.read_parquet(index_path)
+
+        self._zarr_path = filename
+        self._ds = None  # opened lazily
+
+        # Open temporarily with xarray just for init metadata (time handling is easier)
+        ds_xr = xr.open_zarr(filename, group="seviri")
+        ds_xr["time"] = ds_xr["time"].astype("datetime64[ns]")
+        ds_xr = ds_xr.sel(time=slice(stream_info["data_start_time"], stream_info["data_end_time"]))
+        print("Selected time period: ", ds_xr.time.min().values, " to ", ds_xr.time.max().values)
+        
+        # Apply spatial subset
+        ds_xr = ds_xr.isel(
+            latitude=self.spatial_indices["lat_idx"][::self.stride_spatial],
+            longitude=self.spatial_indices["lon_idx"][::self.stride_spatial]
+        )
+
+        # Cache time values as numpy (avoid zarr access for time later)
+        self._time_values = np.array(ds_xr.time.values)
+
+        # Cache spatial indices for zarr access
+        self._lat_idx = np.array(self.spatial_indices["lat_idx"][::self.stride_spatial])
+        self._lon_idx = np.array(self.spatial_indices["lon_idx"][::self.stride_spatial])
+
+        # Find time indices in the full zarr that correspond to our time selection
+        ds_full = xr.open_zarr(filename, group="seviri")
+        ds_full["time"] = ds_full["time"].astype("datetime64[ns]")
+        full_times = ds_full.time.values
+        start_time = ds_xr.time.min().values
+        self._time_offset = int(np.searchsorted(full_times, start_time))
+
+        # caches lats and lons
+        lat_name = stream_info.get("latitude_name", "latitude")
+        self.latitudes = _clip_lat(np.array(ds_xr[lat_name], dtype=np32))
+        lon_name = stream_info.get("longitude_name", "longitude")
+        self.longitudes = _clip_lon(np.array(ds_xr[lon_name], dtype=np32))
 
         # check if the data overlaps with the time window, otherwise initialises as empty datareader
-        if tw_handler.t_start >= ds.time.max() or tw_handler.t_end <= ds.time.min():
+        if tw_handler.t_start >= ds_xr.time.max() or tw_handler.t_end <= ds_xr.time.min():
             name = stream_info["name"]
             _logger.warning(f"{name} is not supported over data loader window. Stream is skipped.")
             super().__init__(tw_handler, stream_info)
@@ -65,9 +102,10 @@ class DataReaderSeviri(DataReaderTimestep):
         if "frequency" in stream_info:
             assert False, "Frequency sub-sampling currently not supported"
 
-        period = (ds.time[1] - ds.time[0]).values
-        data_start_time = ds.time[0].values
-        data_end_time = ds.time[-1].values
+        period = np.timedelta64(self.stride_temporal, "h")
+
+        data_start_time = ds_xr.time[0].values
+        data_end_time = ds_xr.time[-1].values
 
         assert data_start_time is not None and data_end_time is not None, (
             data_start_time,
@@ -88,55 +126,55 @@ class DataReaderSeviri(DataReaderTimestep):
             self.init_empty()
             return
         else:
-            self.ds = ds
-            self.len = len(self.ds['time']) # len(ds), this returns the number of variables, not time steps
+            self.len = len(ds_xr['time']) // self.stride_temporal
 
-        self.exclude = {"LWMASK", "_indices", "quality_flag"} # exclude these from channels because we don't have a statistics for them
-        self.channels_file = [k for k in self.ds.keys()] 
-
-        # caches lats and lons
-        # if you want a spatial subset, do it here
-        index_path  = Path(self.stream_info["metadata"]) / self.stream_info["experiment"] / "seviri_indices.parquet"
-        self.spatial_indices = pd.read_parquet(index_path)
-        ds = ds.isel(latitude=self.spatial_indices["lat_idx"], longitude=self.spatial_indices["lon_idx"])
-
-        lat_name = stream_info.get("latitude_name", "latitude")
-        self.latitudes = _clip_lat(np.array(ds[lat_name], dtype=np32))
-        lon_name = stream_info.get("longitude_name", "longitude")
-        self.longitudes = _clip_lon(np.array(ds[lon_name], dtype=np32))
-
-        #
+        self.exclude = {"LWMASK", "_indices", "quality_flag"}
+        self.channels_file = [k for k in ds_xr.keys()] 
 
         self.geoinfo_channels = stream_info.get("geoinfos", [])
         self.geoinfo_idx = [self.channels_file.index(ch) for ch in self.geoinfo_channels]
+        
         # cache geoinfos
-        #self.geoinfo_data = np.stack([np.array(ds[ch], dtype=np32) for ch in self.geoinfo_channels])
-        #self.geoinfo_data = self.geoinfo_data.transpose()
+        if len(self.geoinfo_channels) != 0:
+            self.geoinfo_data = np.stack([np.array(ds_xr[ch], dtype=np32) for ch in self.geoinfo_channels])
+            self._geoinfo_flat = self.geoinfo_data.transpose([1, 2, 0]).reshape(
+                (-1, len(self.geoinfo_channels))
+            )
 
         # select/filter requested target channels
-        # this will access the stream info, hence make sure to set it.
-        self.target_idx, self.target_channels = self.select_channels(ds, "target")
-        #self.target_channels = [self.channels_file[i] for i in self.target_idx]
+        self.target_idx, self.target_channels = self.select_channels(ds_xr, "target")
 
         self.source_channels = stream_info.get("source", [])
-        #self.source_idx, self.source_channels = self.select_channels(ds, "source")
         self.source_idx = [self.channels_file.index(ch) for ch in self.source_channels]
-        #print("Source channels:", self.source_channels)
-
-        #code.interact(local=locals())
 
         ds_name = stream_info["name"]
         _logger.info(f"{ds_name}: target channels: {self.target_channels}")
 
-        # what is this doing?
         self.properties = {
             "stream_id": 0,
         }
 
-        # or your function to load or compute the statistics
         self.mean, self.stdev = self._create_statistics()
-
         self.mean_geoinfo, self.stdev_geoinfo = self.mean[self.geoinfo_idx], self.stdev[self.geoinfo_idx]
+
+        # Close xarray, force lazy zarr open in workers
+        ds_xr.close()
+        ds_full.close()
+        self._ds = None
+
+    def _open_ds(self):
+        store = zarr.open(self._zarr_path, mode='r')
+        return store['seviri']
+
+    @property
+    def ds(self):
+        if self._ds is None:
+            self._ds = self._open_ds()
+        return self._ds
+
+    @ds.setter
+    def ds(self, value):
+        self._ds = value
 
     def _create_statistics(self):
         statistics = Path(self.stream_info["metadata"]) / self.stream_info["experiment"] / "seviri_statistics.parquet"
@@ -148,7 +186,7 @@ class DataReaderSeviri(DataReaderTimestep):
 
         for ch in self.channels_file:
             if ch in self.exclude:
-                mean.append(0.0) # placeholder for those we don't have statistics for
+                mean.append(0.0)
                 stdev.append(1.0)
             else:
                 mean.append(mean_lookup[ch].astype(np.float32))
@@ -165,7 +203,7 @@ class DataReaderSeviri(DataReaderTimestep):
     @override
     def init_empty(self) -> None:
         super().init_empty()
-        self.ds = None
+        self._ds = None
         self.len = 0
     
     @override
@@ -176,44 +214,40 @@ class DataReaderSeviri(DataReaderTimestep):
     def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
         """
         Get data for window (for either source or target, through public interface)
-        Parameters
-        ----------
-        idx : int
-            Index of temporal window
-        channels_idx : list[int]
-            Selection of channels
-        Returns
-        -------
-        ReaderData providing coords, geoinfos, data, datetimes
         """
 
         (t_idxs, dtr) = self._get_dataset_idxs(idx)
 
-        if self.ds is None or self.len == 0 or len(t_idxs) == 0 or len(channels_idx) == 0:
+        if self._ds is None and self.len == 0:
+            return ReaderData.empty(
+                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
+            )
+        
+        if len(t_idxs) == 0 or len(channels_idx) == 0:
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
 
         assert t_idxs[0] >= 0, "index must be non-negative"
-        didx_start = t_idxs[0]
-        # End is inclusive
-        didx_end = t_idxs[-1] + 1
 
-        # extract number of time steps and collapse ensemble dimension
-        # ds is a wrapper around zarr with get_coordinate_selection not being exposed since
-        # subsetting is pushed to the ctor via frequency argument; this also ensures that no sub-
-        # sampling is required here
+        # Convert to actual zarr indices (accounting for time offset and stride)
+        didx_start = self._time_offset + t_idxs[0] * self.stride_temporal 
+        didx_end = self._time_offset + t_idxs[-1] * self.stride_temporal + 1
+
+        sel_channels = [self.channels_file[i] for i in channels_idx]
         
-        #print("channels_idx to _get:", channels_idx)
-        #sel_channels = [self.channels_file[i] for i in channels_idx]
-        #print("Selected channels:", sel_channels)
-
-        sel_channels = "LST"
-        data = self.ds[sel_channels].isel(time=slice(didx_start, didx_end), 
-                            latitude=self.spatial_indices["lat_idx"], 
-                            longitude=self.spatial_indices["lon_idx"]).values
-
-        print("Data shape after channel selection:", data.shape) # (time, lat, lon) (6, 1474, 1474)
+        # Access zarr directly with numpy advanced indexing
+        data_list = []
+        for ch in sel_channels:
+            # zarr array: shape is (time, lat, lon)
+            ch_data = self.ds[ch][
+                didx_start:didx_end:self.stride_temporal,
+                self._lat_idx,
+                :
+            ][:, :, self._lon_idx]
+            data_list.append(ch_data)
+        
+        data = np.stack(data_list, axis=-1)  # shape: (n_times, n_lats, n_lons, n_channels)
 
         n_times = data.shape[0]
         n_lats = data.shape[1]
@@ -221,12 +255,13 @@ class DataReaderSeviri(DataReaderTimestep):
         n_spatial = n_lats * n_lons
 
         # flatten along time dimension
-        data = data.transpose([1, 2, 0]).reshape((n_spatial * n_times, -1))
+        data = data.reshape((n_times * n_spatial, len(channels_idx)))
 
-        # print("Data shape after flattening time:", data.shape) # (2172676, 6)
-        # set invalid values to NaN
-        #mask = data == self.fillvalue
-        #data[mask] = np.nan
+        # prepare geoinfos
+        if len(self.geoinfo_channels) != 0:
+            geoinfos = np.tile(self._geoinfo_flat, (n_times, 1))
+        else:
+            geoinfos = np.zeros((n_spatial * n_times, 0), dtype=np.float32)
 
         # construct lat/lon coords
         lat2d, lon2d = np.meshgrid(
@@ -234,20 +269,22 @@ class DataReaderSeviri(DataReaderTimestep):
             self.longitudes,
             indexing="ij",
         ) 
-        lat_flat = lat2d.reshape(-1)   # (2172676,)
-        lon_flat = lon2d.reshape(-1)   # (2172676,)
+        lat_flat = lat2d.reshape(-1)   
+        lon_flat = lon2d.reshape(-1)  
 
         # Tile spatial coordinates for each timestep
         coords = np.tile(np.column_stack((lat_flat, lon_flat)), (n_times, 1))
 
-
+        # Use cached time values
+        time_indices = slice(
+            t_idxs[0] * self.stride_temporal,
+            t_idxs[-1] * self.stride_temporal + 1,
+            self.stride_temporal
+        )
         datetimes = np.repeat(
-            self.ds.time[didx_start:didx_end].values, 
+            self._time_values[time_indices],
             n_spatial
         )
-
-        # Empty Geoinfos
-        geoinfos = np.zeros((n_spatial * n_times, 0), dtype=np.float32)
 
         rd = ReaderData(
             coords=coords,
@@ -256,23 +293,19 @@ class DataReaderSeviri(DataReaderTimestep):
             datetimes=datetimes,
         )
         check_reader_data(rd, dtr)
-
+        
         return rd
 
     def select_channels(self, ds, ch_type: str) -> NDArray[np.int64]:
-
         """Select channels based on stream info for either source or target."""
 
         channels = self.stream_info.get(ch_type)
         assert channels is not None, f"{ch_type} channels need to be specified"
-        # sanity check
+        
         is_empty = len(channels) == 0 if channels is not None else False
         if is_empty:
             stream_name = self.stream_info["name"]
             _logger.warning(f"No channel for {stream_name} for {ch_type}.")
-
-        if is_empty:
-            _logger.warning(f"No channel selected for {stream_name} for {ch_type}.")
             chs_idx = np.empty(shape=[0], dtype=int)
             channels = []
         else:
@@ -283,15 +316,10 @@ class DataReaderSeviri(DataReaderTimestep):
 
 
 def _clip_lat(lats: NDArray) -> NDArray[np.float32]:
-    """
-    Clip latitudes to the range [-90, 90] and ensure periodicity.
-    """
+    """Clip latitudes to the range [-90, 90] and ensure periodicity."""
     return (2 * np.clip(lats, -90.0, 90.0) - lats).astype(np.float32)
 
 
-# TODO: move to base class
 def _clip_lon(lons: NDArray) -> NDArray[np.float32]:
-    """
-    Clip longitudes to the range [-180, 180] and ensure periodicity.
-    """
+    """Clip longitudes to the range [-180, 180] and ensure periodicity."""
     return ((lons + 180.0) % 360.0 - 180.0).astype(np.float32)
