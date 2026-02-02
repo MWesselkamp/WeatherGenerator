@@ -22,6 +22,8 @@ import pdb
 
 # for reading the parquet files
 import pandas as pd
+import os
+os.environ['ZARR_V3_EXPERIMENTAL_API'] = '1'
 
 from weathergen.datasets.data_reader_base import (
     DataReaderTimestep,
@@ -32,7 +34,6 @@ from weathergen.datasets.data_reader_base import (
 )
 
 _logger = logging.getLogger(__name__)
-
 
 class DataReaderSeviri(DataReaderTimestep):
     """Data reader for SEVIRI satellite data."""
@@ -53,8 +54,8 @@ class DataReaderSeviri(DataReaderTimestep):
         self.stride_temporal = 6 # downsample to six hourly timesteps
         self.stride_spatial = 8 # use every 8th point to reduce memory usage on workers
 
-        index_path  = Path(stream_info["metadata"]) / stream_info["experiment"] / "seviri_indices.parquet"
-        self.spatial_indices = pd.read_parquet(index_path)
+        index_path  = Path(stream_info["metadata"])
+        self.spatial_indices = np.load(index_path)["seviri_indices"]
 
         self._zarr_path = filename
         self._ds = None  # opened lazily
