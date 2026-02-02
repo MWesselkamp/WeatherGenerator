@@ -20,8 +20,6 @@ import zarr
 import code 
 import pdb 
 
-# for reading the parquet files
-import pandas as pd
 import os
 os.environ['ZARR_V3_EXPERIMENTAL_API'] = '1'
 
@@ -54,7 +52,7 @@ class DataReaderSeviri(DataReaderTimestep):
         self.stride_temporal = 6 # downsample to six hourly timesteps
         self.stride_spatial = 8 # use every 8th point to reduce memory usage on workers
 
-        index_path  = Path(stream_info["metadata"])
+        index_path  = Path(stream_info["metadata"]) / "train_scene_000.npz"
         self.spatial_indices = np.load(index_path)["seviri_indices"]
 
         self._zarr_path = filename
@@ -66,18 +64,24 @@ class DataReaderSeviri(DataReaderTimestep):
         ds_xr = ds_xr.sel(time=slice(stream_info["data_start_time"], stream_info["data_end_time"]))
         print("Selected time period: ", ds_xr.time.min().values, " to ", ds_xr.time.max().values)
         
+        col_extent = ds_xr['longitude'].shape[0]
+        lat_idx = self.spatial_indices // col_extent
+        lon_idx = self.spatial_indices % col_extent
+
+        # Cache spatial indices for zarr access
+        self._lat_idx = np.array(lat_idx[::self.stride_spatial])
+        self._lon_idx = np.array(lon_idx[::self.stride_spatial])
+
+        #code.interact(local=locals())
+
         # Apply spatial subset
         ds_xr = ds_xr.isel(
-            latitude=self.spatial_indices["lat_idx"][::self.stride_spatial],
-            longitude=self.spatial_indices["lon_idx"][::self.stride_spatial]
+            latitude=self._lat_idx,
+            longitude=self._lon_idx
         )
 
         # Cache time values as numpy (avoid zarr access for time later)
         self._time_values = np.array(ds_xr.time.values)
-
-        # Cache spatial indices for zarr access
-        self._lat_idx = np.array(self.spatial_indices["lat_idx"][::self.stride_spatial])
-        self._lon_idx = np.array(self.spatial_indices["lon_idx"][::self.stride_spatial])
 
         # Find time indices in the full zarr that correspond to our time selection
         ds_full = xr.open_zarr(filename, group="seviri")
@@ -129,7 +133,7 @@ class DataReaderSeviri(DataReaderTimestep):
         else:
             self.len = len(ds_xr['time']) // self.stride_temporal
 
-        self.exclude = {"LWMASK", "_indices", "quality_flag"}
+        self.exclude = {"LWMASK", "LANDCOV", "_indices", "quality_flag"}
         self.channels_file = [k for k in ds_xr.keys()] 
 
         self.geoinfo_channels = stream_info.get("geoinfos", [])
@@ -178,10 +182,11 @@ class DataReaderSeviri(DataReaderTimestep):
         self._ds = value
 
     def _create_statistics(self):
-        statistics = Path(self.stream_info["metadata"]) / self.stream_info["experiment"] / "seviri_statistics.parquet"
-        df_stats = pd.read_parquet(statistics)
-        mean_lookup = df_stats.set_index('variable')["mean"]
-        std_lookup = df_stats.set_index('variable')["std"]
+        statistics = Path(self.stream_info["metadata"]) / "statistics_global.npz"
+        df_stats = _assemble_statistics_from_npz(statistics)
+
+        #mean_lookup = df_stats.set_index('variable')["mean"]
+        #std_lookup = df_stats.set_index('variable')["std"]
 
         mean, stdev = [], []
 
@@ -190,8 +195,8 @@ class DataReaderSeviri(DataReaderTimestep):
                 mean.append(0.0)
                 stdev.append(1.0)
             else:
-                mean.append(mean_lookup[ch].astype(np.float32))
-                stdev.append(std_lookup[ch].astype(np.float32))
+                mean.append(df_stats[ch]["mean"])
+                stdev.append(df_stats[ch]["std"])
         
         mean = np.array(mean)
         stdev = np.array(stdev)
@@ -324,3 +329,26 @@ def _clip_lat(lats: NDArray) -> NDArray[np.float32]:
 def _clip_lon(lons: NDArray) -> NDArray[np.float32]:
     """Clip longitudes to the range [-180, 180] and ensure periodicity."""
     return ((lons + 180.0) % 360.0 - 180.0).astype(np.float32)
+
+def _assemble_statistics_from_npz(src: str | Path ) -> dict[str, dict[str, float]]:
+    """
+    Loads statistics saved with `save_statistics_npz`.
+    Returns:
+        dict[var_name, dict[stat_name, value]]
+    """
+    out: dict[str, dict[str, float]] = {}
+
+    # If it's path-like, normalize to Path; otherwise assume it's file-like
+    if isinstance(src, (str, os.PathLike)):
+        src = Path(src)
+
+    with np.load(src, allow_pickle=True) as z:
+        variables = list(z['variables'])
+        stat_names = [k for k in z.files if k != 'variables']
+
+        for i, var in enumerate(variables):
+            out[str(var)] = {}
+            for stat in stat_names:
+                out[str(var)][stat] = np.asarray(z[stat][i]).item()
+
+    return out
