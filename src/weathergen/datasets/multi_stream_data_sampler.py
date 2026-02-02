@@ -64,6 +64,7 @@ def collect_datasources(stream_datasets: list, idx: int, type: str) -> IOReaderD
     rdatas = []
 
     for ds in stream_datasets:
+        #code.interact(local=locals())
         if type == "source":
             get_reader_data = ds.get_source
             normalize_channels = ds.normalize_source_channels
@@ -151,7 +152,7 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                         datapath = cf.data_path_fesom
                     case "msg_lst":
                         dataset = DataReaderSeviri
-                        datapath = cf.data_path_obs
+                        datapath = cf.data_path_anemoi # on leonardo.
                     case type_name:
                         reader_entry = get_extra_reader(type_name, cf)
                         if reader_entry is not None:
