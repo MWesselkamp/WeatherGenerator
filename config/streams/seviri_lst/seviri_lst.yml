@@ -10,20 +10,21 @@
 
 SEVIRI_LST :
   type : msg_lst
-  filenames : ['lst_test.zarr']
-  data_start_time : "2017-05-01 00:00"
-  data_end_time : "2017-06-30 00:00"
+  filenames : ['mpg_seviri_l2_2017-18_v0/lst_test.zarr'] # use ['mpg_seviri_l2_2017-18_v0/seviri.zarr'] after zarr3 is enabled
+  data_start_time : "2017-01-01 00:00"
+  data_end_time : "2017-09-30 00:00"
   target: ["LST"]
   source: ["LST"]
   geoinfos: ["DEM"] #, "LANDCOV"]
-  metadata: "/leonardo_work/AIFAC_5C0_154/weathergen/data/mpg_seviri_l2_2017-18_v0/metadata_lst_test"
-  experiment: "johannesburg"
+  metadata: "/leonardo_work/AIFAC_5C0_154/weathergen/data/mpg_seviri_l2_2017-18_v1/metadata" # uses one scene over south africa for finetuning 
   loss_weight : 1.0
   masking_rate : 0.6
   masking_rate_none : 0.05
   token_size : 64
   tokenize_spacetime : True
   max_num_targets: -1 #-1
+  val_source_channels: ["LST"]
+  val_target_channels: ["LST"]
   embed :
     net : transformer
     num_tokens : 1

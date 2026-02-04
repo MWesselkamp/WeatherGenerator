@@ -21,7 +21,7 @@ import code
 import pdb 
 
 import os
-os.environ['ZARR_V3_EXPERIMENTAL_API'] = '1'
+os.environ['ZARR_V3_EXPERIMENTAL_API'] = '1' # doesn't seem to work 
 
 from weathergen.datasets.data_reader_base import (
     DataReaderTimestep,
@@ -50,7 +50,7 @@ class DataReaderSeviri(DataReaderTimestep):
 
         # set sampling parameters
         self.stride_temporal = 6 # downsample to six hourly timesteps
-        self.stride_spatial = 8 # use every 8th point to reduce memory usage on workers
+        self.stride_spatial = 0 # use every 8th point to reduce memory usage on workers
 
         index_path  = Path(stream_info["metadata"]) / "train_scene_000.npz"
         self.spatial_indices = np.load(index_path)["seviri_indices"]
