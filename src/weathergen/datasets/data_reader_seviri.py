@@ -7,21 +7,18 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+# for interactive debugging
 import logging
+import os
 from pathlib import Path
 from typing import override
 
 import numpy as np
 import xarray as xr
-from numpy.typing import NDArray
 import zarr
+from numpy.typing import NDArray
 
-# for interactive debugging
-import code 
-import pdb 
-
-import os
-os.environ['ZARR_V3_EXPERIMENTAL_API'] = '1' # doesn't seem to work 
+os.environ["ZARR_V3_EXPERIMENTAL_API"] = "1"  # doesn't seem to work
 
 from weathergen.datasets.data_reader_base import (
     DataReaderTimestep,
@@ -33,6 +30,7 @@ from weathergen.datasets.data_reader_base import (
 
 _logger = logging.getLogger(__name__)
 
+
 class DataReaderSeviri(DataReaderTimestep):
     """Data reader for SEVIRI satellite data."""
 
@@ -42,17 +40,16 @@ class DataReaderSeviri(DataReaderTimestep):
         filename: Path,
         stream_info: dict,
     ) -> None:
-
         """Initialize the SEVIRI data reader."""
 
         self.fillvalue = np.nan
         np32 = np.float32
 
         # set sampling parameters
-        self.stride_temporal = 6 # downsample to six hourly timesteps
-        self.stride_spatial = 0 # use every 8th point to reduce memory usage on workers
+        self.stride_temporal = 6  # downsample to six hourly timesteps
+        self.stride_spatial = 0  # use every 8th point to reduce memory usage on workers
 
-        index_path  = Path(stream_info["metadata"]) / "train_scene_000.npz"
+        index_path = Path(stream_info["metadata"]) / "train_scene_000.npz"
         self.spatial_indices = np.load(index_path)["seviri_indices"]
 
         self._zarr_path = filename
@@ -62,23 +59,19 @@ class DataReaderSeviri(DataReaderTimestep):
         ds_xr = xr.open_zarr(filename, group="seviri")
         ds_xr["time"] = ds_xr["time"].astype("datetime64[ns]")
         ds_xr = ds_xr.sel(time=slice(stream_info["data_start_time"], stream_info["data_end_time"]))
-        print("Selected time period: ", ds_xr.time.min().values, " to ", ds_xr.time.max().values)
-        
-        col_extent = ds_xr['longitude'].shape[0]
+
+        col_extent = ds_xr["longitude"].shape[0]
         lat_idx = self.spatial_indices // col_extent
         lon_idx = self.spatial_indices % col_extent
 
         # Cache spatial indices for zarr access
-        self._lat_idx = np.array(lat_idx[::self.stride_spatial])
-        self._lon_idx = np.array(lon_idx[::self.stride_spatial])
+        self._lat_idx = np.array(lat_idx[:: self.stride_spatial])
+        self._lon_idx = np.array(lon_idx[:: self.stride_spatial])
 
-        #code.interact(local=locals())
+        # code.interact(local=locals())
 
         # Apply spatial subset
-        ds_xr = ds_xr.isel(
-            latitude=self._lat_idx,
-            longitude=self._lon_idx
-        )
+        ds_xr = ds_xr.isel(latitude=self._lat_idx, longitude=self._lon_idx)
 
         # Cache time values as numpy (avoid zarr access for time later)
         self._time_values = np.array(ds_xr.time.values)
@@ -103,7 +96,7 @@ class DataReaderSeviri(DataReaderTimestep):
             super().__init__(tw_handler, stream_info)
             self.init_empty()
             return
-        
+
         if "frequency" in stream_info:
             assert False, "Frequency sub-sampling currently not supported"
 
@@ -131,17 +124,19 @@ class DataReaderSeviri(DataReaderTimestep):
             self.init_empty()
             return
         else:
-            self.len = len(ds_xr['time']) // self.stride_temporal
+            self.len = len(ds_xr["time"]) // self.stride_temporal
 
         self.exclude = {"LWMASK", "LANDCOV", "_indices", "quality_flag"}
-        self.channels_file = [k for k in ds_xr.keys()] 
+        self.channels_file = [k for k in ds_xr.keys()]
 
         self.geoinfo_channels = stream_info.get("geoinfos", [])
         self.geoinfo_idx = [self.channels_file.index(ch) for ch in self.geoinfo_channels]
-        
+
         # cache geoinfos
         if len(self.geoinfo_channels) != 0:
-            self.geoinfo_data = np.stack([np.array(ds_xr[ch], dtype=np32) for ch in self.geoinfo_channels])
+            self.geoinfo_data = np.stack(
+                [np.array(ds_xr[ch], dtype=np32) for ch in self.geoinfo_channels]
+            )
             self._geoinfo_flat = self.geoinfo_data.transpose([1, 2, 0]).reshape(
                 (-1, len(self.geoinfo_channels))
             )
@@ -160,7 +155,10 @@ class DataReaderSeviri(DataReaderTimestep):
         }
 
         self.mean, self.stdev = self._create_statistics()
-        self.mean_geoinfo, self.stdev_geoinfo = self.mean[self.geoinfo_idx], self.stdev[self.geoinfo_idx]
+        self.mean_geoinfo, self.stdev_geoinfo = (
+            self.mean[self.geoinfo_idx],
+            self.stdev[self.geoinfo_idx],
+        )
 
         # Close xarray, force lazy zarr open in workers
         ds_xr.close()
@@ -168,8 +166,8 @@ class DataReaderSeviri(DataReaderTimestep):
         self._ds = None
 
     def _open_ds(self):
-        store = zarr.open(self._zarr_path, mode='r')
-        return store['seviri']
+        store = zarr.open(self._zarr_path, mode="r")
+        return store["seviri"]
 
     @property
     def ds(self):
@@ -185,8 +183,8 @@ class DataReaderSeviri(DataReaderTimestep):
         statistics = Path(self.stream_info["metadata"]) / "statistics_global.npz"
         df_stats = _assemble_statistics_from_npz(statistics)
 
-        #mean_lookup = df_stats.set_index('variable')["mean"]
-        #std_lookup = df_stats.set_index('variable')["std"]
+        # mean_lookup = df_stats.set_index('variable')["mean"]
+        # std_lookup = df_stats.set_index('variable')["std"]
 
         mean, stdev = [], []
 
@@ -197,12 +195,9 @@ class DataReaderSeviri(DataReaderTimestep):
             else:
                 mean.append(df_stats[ch]["mean"])
                 stdev.append(df_stats[ch]["std"])
-        
+
         mean = np.array(mean)
         stdev = np.array(stdev)
-
-        print("Mean shape", mean.shape)
-        print("Means", mean)
 
         return mean, stdev
 
@@ -211,7 +206,7 @@ class DataReaderSeviri(DataReaderTimestep):
         super().init_empty()
         self._ds = None
         self.len = 0
-    
+
     @override
     def length(self) -> int:
         return self.len
@@ -228,7 +223,7 @@ class DataReaderSeviri(DataReaderTimestep):
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
-        
+
         if len(t_idxs) == 0 or len(channels_idx) == 0:
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
@@ -237,22 +232,20 @@ class DataReaderSeviri(DataReaderTimestep):
         assert t_idxs[0] >= 0, "index must be non-negative"
 
         # Convert to actual zarr indices (accounting for time offset and stride)
-        didx_start = self._time_offset + t_idxs[0] * self.stride_temporal 
+        didx_start = self._time_offset + t_idxs[0] * self.stride_temporal
         didx_end = self._time_offset + t_idxs[-1] * self.stride_temporal + 1
 
         sel_channels = [self.channels_file[i] for i in channels_idx]
-        
+
         # Access zarr directly with numpy advanced indexing
         data_list = []
         for ch in sel_channels:
             # zarr array: shape is (time, lat, lon)
-            ch_data = self.ds[ch][
-                didx_start:didx_end:self.stride_temporal,
-                self._lat_idx,
-                :
-            ][:, :, self._lon_idx]
+            ch_data = self.ds[ch][didx_start : didx_end : self.stride_temporal, self._lat_idx, :][
+                :, :, self._lon_idx
+            ]
             data_list.append(ch_data)
-        
+
         data = np.stack(data_list, axis=-1)  # shape: (n_times, n_lats, n_lons, n_channels)
 
         n_times = data.shape[0]
@@ -274,9 +267,9 @@ class DataReaderSeviri(DataReaderTimestep):
             self.latitudes,
             self.longitudes,
             indexing="ij",
-        ) 
-        lat_flat = lat2d.reshape(-1)   
-        lon_flat = lon2d.reshape(-1)  
+        )
+        lat_flat = lat2d.reshape(-1)
+        lon_flat = lon2d.reshape(-1)
 
         # Tile spatial coordinates for each timestep
         coords = np.tile(np.column_stack((lat_flat, lon_flat)), (n_times, 1))
@@ -285,12 +278,9 @@ class DataReaderSeviri(DataReaderTimestep):
         time_indices = slice(
             t_idxs[0] * self.stride_temporal,
             t_idxs[-1] * self.stride_temporal + 1,
-            self.stride_temporal
+            self.stride_temporal,
         )
-        datetimes = np.repeat(
-            self._time_values[time_indices],
-            n_spatial
-        )
+        datetimes = np.repeat(self._time_values[time_indices], n_spatial)
 
         rd = ReaderData(
             coords=coords,
@@ -299,7 +289,7 @@ class DataReaderSeviri(DataReaderTimestep):
             datetimes=datetimes,
         )
         check_reader_data(rd, dtr)
-        
+
         return rd
 
     def select_channels(self, ds, ch_type: str) -> NDArray[np.int64]:
@@ -307,7 +297,7 @@ class DataReaderSeviri(DataReaderTimestep):
 
         channels = self.stream_info.get(ch_type)
         assert channels is not None, f"{ch_type} channels need to be specified"
-        
+
         is_empty = len(channels) == 0 if channels is not None else False
         if is_empty:
             stream_name = self.stream_info["name"]
@@ -330,7 +320,8 @@ def _clip_lon(lons: NDArray) -> NDArray[np.float32]:
     """Clip longitudes to the range [-180, 180] and ensure periodicity."""
     return ((lons + 180.0) % 360.0 - 180.0).astype(np.float32)
 
-def _assemble_statistics_from_npz(src: str | Path ) -> dict[str, dict[str, float]]:
+
+def _assemble_statistics_from_npz(src: str | Path) -> dict[str, dict[str, float]]:
     """
     Loads statistics saved with `save_statistics_npz`.
     Returns:
@@ -339,12 +330,12 @@ def _assemble_statistics_from_npz(src: str | Path ) -> dict[str, dict[str, float
     out: dict[str, dict[str, float]] = {}
 
     # If it's path-like, normalize to Path; otherwise assume it's file-like
-    if isinstance(src, (str, os.PathLike)):
+    if isinstance(src, (str | Path)):
         src = Path(src)
 
     with np.load(src, allow_pickle=True) as z:
-        variables = list(z['variables'])
-        stat_names = [k for k in z.files if k != 'variables']
+        variables = list(z["variables"])
+        stat_names = [k for k in z.files if k != "variables"]
 
         for i, var in enumerate(variables):
             out[str(var)] = {}
