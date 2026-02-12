@@ -7,6 +7,7 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+# for interactive debugging
 import logging
 import pathlib
 
@@ -23,6 +24,7 @@ from weathergen.datasets.data_reader_base import (
 )
 from weathergen.datasets.data_reader_fesom import DataReaderFesom
 from weathergen.datasets.data_reader_obs import DataReaderObs
+from weathergen.datasets.data_reader_seviri import DataReaderSeviri
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_forecast import TokenizerForecast
@@ -60,6 +62,7 @@ def collect_datasources(stream_datasets: list, idx: int, type: str) -> IOReaderD
     rdatas = []
 
     for ds in stream_datasets:
+        # code.interact(local=locals())
         if type == "source":
             get_reader_data = ds.get_source
             normalize_channels = ds.normalize_source_channels
@@ -145,6 +148,9 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     case "fesom":
                         dataset = DataReaderFesom
                         datapath = cf.data_path_fesom
+                    case "msg_lst":
+                        dataset = DataReaderSeviri
+                        datapath = cf.data_path_anemoi  # on leonardo.
                     case type_name:
                         reader_entry = get_extra_reader(type_name, cf)
                         if reader_entry is not None:
