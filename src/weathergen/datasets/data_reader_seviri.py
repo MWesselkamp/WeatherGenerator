@@ -46,10 +46,10 @@ class DataReaderSeviri(DataReaderTimestep):
         np32 = np.float32
 
         # set sampling parameters
-        self.stride_temporal = 6  # downsample to six hourly timesteps
-        self.stride_spatial = 0  # use every 8th point to reduce memory usage on workers
+        self.stride_temporal = stream_info["temporal_stride"]  # downsample to six hourly timesteps
+        self.stride_spatial = stream_info["spatial_stride"]  # use every 8th point to reduce memory usage on workers
 
-        index_path = Path(stream_info["metadata"]) / "train_scene_000.npz"
+        index_path = Path(stream_info["metadata"]) / stream_info["scene"]
         self.spatial_indices = np.load(index_path)["seviri_indices"]
 
         self._zarr_path = filename
@@ -160,6 +160,7 @@ class DataReaderSeviri(DataReaderTimestep):
             self.stdev[self.geoinfo_idx],
         )
 
+        print(f"geoinfo_channels: {self.geoinfo_channels}, _geoinfo_flat shape: {getattr(self, '_geoinfo_flat', 'NOT SET')}")
         # Close xarray, force lazy zarr open in workers
         ds_xr.close()
         ds_full.close()
@@ -182,9 +183,6 @@ class DataReaderSeviri(DataReaderTimestep):
     def _create_statistics(self):
         statistics = Path(self.stream_info["metadata"]) / "statistics_global.npz"
         df_stats = _assemble_statistics_from_npz(statistics)
-
-        # mean_lookup = df_stats.set_index('variable')["mean"]
-        # std_lookup = df_stats.set_index('variable')["std"]
 
         mean, stdev = [], []
 
@@ -216,6 +214,7 @@ class DataReaderSeviri(DataReaderTimestep):
         """
         Get data for window (for either source or target, through public interface)
         """
+        print(f"geoinfo_channels: {self.geoinfo_channels}, _geoinfo_flat shape: {getattr(self, '_geoinfo_flat', 'NOT SET')}")
 
         (t_idxs, dtr) = self._get_dataset_idxs(idx)
 
