@@ -47,7 +47,9 @@ class DataReaderSeviri(DataReaderTimestep):
 
         # set sampling parameters
         self.stride_temporal = stream_info["temporal_stride"]  # downsample to six hourly timesteps
-        self.stride_spatial = stream_info["spatial_stride"]  # use every 8th point to reduce memory usage on workers
+        self.stride_spatial = stream_info[
+            "spatial_stride"
+        ]  # use every 8th point to reduce memory usage on workers
 
         index_path = Path(stream_info["metadata"]) / stream_info["scene"]
         self.spatial_indices = np.load(index_path)["seviri_indices"]
@@ -160,7 +162,6 @@ class DataReaderSeviri(DataReaderTimestep):
             self.stdev[self.geoinfo_idx],
         )
 
-        print(f"geoinfo_channels: {self.geoinfo_channels}, _geoinfo_flat shape: {getattr(self, '_geoinfo_flat', 'NOT SET')}")
         # Close xarray, force lazy zarr open in workers
         ds_xr.close()
         ds_full.close()
@@ -214,8 +215,6 @@ class DataReaderSeviri(DataReaderTimestep):
         """
         Get data for window (for either source or target, through public interface)
         """
-        print(f"geoinfo_channels: {self.geoinfo_channels}, _geoinfo_flat shape: {getattr(self, '_geoinfo_flat', 'NOT SET')}")
-
         (t_idxs, dtr) = self._get_dataset_idxs(idx)
 
         if self._ds is None and self.len == 0:
